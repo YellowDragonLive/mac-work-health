@@ -1,0 +1,10 @@
+# Swift Package Manager 构建产物
+.build/
+swiftpm/
+
+# macOS 应用包（构建产物）
+*.app/
+
+# 系统文件
+.DS_Store
+*.xcuserdata/
