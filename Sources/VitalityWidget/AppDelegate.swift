@@ -130,6 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // MARK: - 轮询：跨天重置 + 到点提醒
     private func tick() {
+        // 先滚番茄钟再滚清单，避免跨天瞬间把昨天的番茄数写进新一天的历史
+        store.pomo.rollDayIfNeeded()
         if store.rollDayIfNeeded() {
             rescheduleNotifications()
         }

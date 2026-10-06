@@ -19,6 +19,7 @@ struct ContentView: View {
                     checklistCard
                     metricsCard
                     trendCard
+                    calendarCard
                     pomoCard
                     settingsCard
                     breathCard
@@ -219,10 +220,23 @@ struct ContentView: View {
                 Text("📊 今日测量")
                     .font(.system(size: 12.5, weight: .bold))
                 Spacer()
-                Text("当天记录 · 0 点重置")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(.secondary)
+                if let saved = store.metrics.savedAt {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 9.5))
+                            .foregroundColor(.mintC)
+                        Text("已记录 \(epochText(saved))")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.mintC)
+                    }
+                    .transition(.scale.combined(with: .opacity))
+                } else {
+                    Text("当天记录 · 0 点重置")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                }
             }
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: store.metrics.savedAt)
 
             // 体重
             HStack(spacing: 8) {
@@ -234,10 +248,18 @@ struct ContentView: View {
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                 Spacer()
-                Text("晨起空腹")
-                    .font(.system(size: 9.5))
-                    .foregroundColor(Color.white.opacity(0.25))
+                if (m.weight ?? 0) > 0 {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.mintC)
+                        .transition(.scale.combined(with: .opacity))
+                } else {
+                    Text("晨起空腹")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(Color.white.opacity(0.25))
+                }
             }
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: m.weight)
 
             // 血压
             HStack(spacing: 8) {
@@ -289,6 +311,11 @@ struct ContentView: View {
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.08)))
+    }
+
+    private func epochText(_ epoch: Double) -> String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: epoch))
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
     }
 
     // 输入清洗：只留 ASCII 数字，体重额外留一个小数点
@@ -625,6 +652,202 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: 月历打卡
+    @State private var calAnchor = Date()
+    @State private var selectedDate = Date()
+
+    private var calendarCard: some View {
+        let info = monthGrid(for: calAnchor)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button(action: { moveMonth(-1) }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.white.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(info.title)
+                    .font(.system(size: 12.5, weight: .bold))
+                Spacer()
+                Button(action: { moveMonth(1) }) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.white.opacity(0.06)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 0) {
+                ForEach(["日", "一", "二", "三", "四", "五", "六"], id: \.self) { w in
+                    Text(w)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7), spacing: 4) {
+                ForEach(Array(info.grid.enumerated()), id: \.offset) { _, d in
+                    calCell(d)
+                }
+            }
+
+            dayDetail
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.08)))
+    }
+
+    private func monthGrid(for anchor: Date) -> (title: String, grid: [Date?]) {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month], from: anchor)
+        guard let first = cal.date(from: comps),
+              let range = cal.range(of: .day, in: .month, for: first) else {
+            return ("", [])
+        }
+        var grid: [Date?] = Array(repeating: nil, count: cal.component(.weekday, from: first) - 1)
+        for day in range {
+            if let d = cal.date(byAdding: .day, value: day - 1, to: first) { grid.append(d) }
+        }
+        while grid.count % 7 != 0 { grid.append(nil) }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "yyyy年M月"
+        return (fmt.string(from: first), grid)
+    }
+
+    private func moveMonth(_ delta: Int) {
+        if let d = Calendar.current.date(byAdding: .month, value: delta, to: calAnchor) {
+            calAnchor = d
+        }
+    }
+
+    private struct DayInfo {
+        var metrics: Bool
+        var checklist: Bool
+        var tomatoes: Bool
+        var doneCount: Int
+        var tomatoCount: Int
+        var metricsVal: VitalityMetrics
+    }
+
+    private func dayStatus(_ d: Date) -> DayInfo {
+        if Calendar.current.isDateInToday(d) {
+            let mv = store.metrics
+            let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
+            let tc = store.pomo.state.todayTomatoes
+            return DayInfo(metrics: hasM, checklist: !store.done.isEmpty, tomatoes: tc > 0,
+                           doneCount: store.done.count, tomatoCount: tc, metricsVal: mv)
+        }
+        let h = historyMap[VitalityStore.isoKey(d)]
+        let mv = VitalityMetrics(weight: h?.weight, sys: h?.sys, dia: h?.dia,
+                                 sleepMinutes: h?.sleepMinutes, savedAt: nil)
+        let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
+        let dc = h?.doneCount ?? 0
+        let tc = h?.tomatoes ?? 0
+        return DayInfo(metrics: hasM, checklist: dc > 0, tomatoes: tc > 0,
+                       doneCount: dc, tomatoCount: tc, metricsVal: mv)
+    }
+
+    @ViewBuilder
+    private func calCell(_ date: Date?) -> some View {
+        if let d = date {
+            let st = dayStatus(d)
+            let isToday = Calendar.current.isDateInToday(d)
+            let isFuture = d > Date() && !isToday
+            let isSel = Calendar.current.isDate(selectedDate, inSameDayAs: d)
+            Button(action: { if !isFuture { selectedDate = d } }) {
+                VStack(spacing: 2) {
+                    Text("\(Calendar.current.component(.day, from: d))")
+                        .font(.system(size: 10.5, weight: isToday || isSel ? .bold : .regular))
+                        .foregroundColor(isFuture ? Color.white.opacity(0.18) : isSel ? .gold : .primary)
+                    HStack(spacing: 2) {
+                        if st.metrics { Circle().fill(Color.mintC).frame(width: 3, height: 3) }
+                        if st.checklist { Circle().fill(Color.skyC).frame(width: 3, height: 3) }
+                        if st.tomatoes { Circle().fill(Color.gold).frame(width: 3, height: 3) }
+                    }
+                    .frame(height: 3)
+                }
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSel ? Color.gold.opacity(0.14) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(isToday ? Color.mintC.opacity(0.7) : Color.clear, lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Color.clear.frame(maxWidth: .infinity, minHeight: 30)
+        }
+    }
+
+    @ViewBuilder
+    private var dayDetail: some View {
+        let st = dayStatus(selectedDate)
+        let isToday = Calendar.current.isDateInToday(selectedDate)
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "M月d日 EEE"
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(fmt.string(from: selectedDate))
+                    .font(.system(size: 11, weight: .bold))
+                if isToday {
+                    Text("今天")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(Color(hex: 0x06231c))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.mintC))
+                }
+                Spacer()
+            }
+            if st.metrics || st.checklist || st.tomatoes {
+                detailRow("⚡", "清单", "\(st.doneCount) / \(TASKS.count)")
+                if let w = st.metricsVal.weight {
+                    detailRow("⚖️", "体重", String(format: "%.1f kg", w))
+                }
+                if let s = st.metricsVal.sys, let dd = st.metricsVal.dia {
+                    detailRow("🩺", "血压", "\(s)/\(dd) mmHg")
+                }
+                if st.metricsVal.sleepText != nil {
+                    detailRow("😴", "睡眠", st.metricsVal.sleepText ?? "")
+                }
+                if st.tomatoCount > 0 {
+                    detailRow("🍅", "番茄", "\(st.tomatoCount) 个")
+                }
+            } else {
+                Text("这一天没有记录")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.22)))
+    }
+
+    private func detailRow(_ icon: String, _ title: String, _ value: String) -> some View {
+        HStack {
+            Text("\(icon) \(title)")
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 10.5, weight: .semibold))
         }
     }
 

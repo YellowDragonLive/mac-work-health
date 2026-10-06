@@ -69,6 +69,7 @@ struct VitalityMetrics: Codable, Equatable {
     var sys: Int?              // 收缩压（高压）
     var dia: Int?              // 舒张压（低压）
     var sleepMinutes: Int?     // 昨晚睡眠分钟数
+    var savedAt: Double? = nil // 最近一次记录的时刻（epoch 秒），用于“已记录”反馈
 
     var bpStatus: (String, Color)? {
         guard let s = sys, let d = dia, s > 0, d > 0 else { return nil }
@@ -122,13 +123,15 @@ struct MetricsText: Equatable {
     }
 }
 
-// MARK: - 历史记录（每天一份快照，用于趋势图）
+// MARK: - 历史记录（每天一份快照，用于趋势图与月历打卡）
 struct HistoryDay: Codable, Equatable {
     let date: String          // "2025-03-05"
     var weight: Double?
     var sys: Int?
     var dia: Int?
     var sleepMinutes: Int?
+    var doneCount: Int?        // 当天完成清单数
+    var tomatoes: Int?         // 当天完成番茄数
 }
 
 // MARK: - 全局状态存储（本机持久化，跨天自动重置）
@@ -213,11 +216,18 @@ final class VitalityStore: ObservableObject {
         persistHistory()
     }
 
-    /// 把当天的测量写进历史（同一天覆盖，最多留 90 天）
+    /// 把当天的测量与打卡写入历史（同一天覆盖，最多留 90 天）
     private func syncHistoryToday() {
         let key = VitalityStore.isoKey()
-        let entry = HistoryDay(date: key, weight: metrics.weight, sys: metrics.sys,
-                               dia: metrics.dia, sleepMinutes: metrics.sleepMinutes)
+        let entry = HistoryDay(
+            date: key,
+            weight: metrics.weight,
+            sys: metrics.sys,
+            dia: metrics.dia,
+            sleepMinutes: metrics.sleepMinutes,
+            doneCount: done.count,
+            tomatoes: pomo.state.todayTomatoes
+        )
         if let i = history.firstIndex(where: { $0.date == key }) {
             history[i] = entry
         } else {
@@ -235,7 +245,10 @@ final class VitalityStore: ObservableObject {
 
     func setMetrics(_ mutate: (inout MetricsText) -> Void) {
         mutate(&metricsText)
-        metrics = metricsText.parsed
+        var m = metricsText.parsed
+        let hasAny = m.weight != nil || m.sys != nil || m.dia != nil || m.sleepMinutes != nil
+        m.savedAt = hasAny ? Date().timeIntervalSince1970 : nil
+        metrics = m
         persistState()
     }
 
@@ -426,9 +439,9 @@ final class PomodoroEngine: ObservableObject {
         }
     }
 
-    private func rollDayIfNeeded() {
+    private func rollDayIfEmpty() -> Bool {
         let today = VitalityStore.todayKey()
-        guard state.todayKey != today else { return }
+        guard state.todayKey != today || state.todayKey == "" else { return false }
         state.todayKey = today
         state.todayTomatoes = 0
         state.cycleIndex = 0
@@ -436,6 +449,12 @@ final class PomodoroEngine: ObservableObject {
         state.running = false
         state.remaining = duration(of: .focus)
         state.endAt = 0
+        return true
+    }
+
+    /// 跨天重置（幂等，AppDelegate 轮询与引擎自身时钟都会调）
+    func rollDayIfNeeded() {
+        if rollDayIfEmpty() { persist() }
     }
 
     /// 应用退出期间到点：静默推进（番茄照样计数，但不打扰）
