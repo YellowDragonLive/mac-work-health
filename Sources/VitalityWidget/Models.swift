@@ -49,12 +49,37 @@ let TASKS: [VitalityTask] = [
 ]
 
 // MARK: - 设置
-struct VitalitySettings: Codable, Equatable {
+struct VitalitySettings: Equatable {
     var sound = true
     var speech = false
     var hourly = false
     var launchAtLogin = false
     var notificationsAsked = false
+    var pomoTick = true         // 番茄钟专注运行中的滴答声
+    var cardTrend = true        // 卡片显隐：近 7 天趋势
+    var cardCalendar = true     // 卡片显隐：月历打卡
+    var cardBreath = true       // 卡片显隐：呼吸练习
+}
+
+// 自定义解码 + 自动编码；老配置缺新字段时用默认值，而不是整个重置
+extension VitalitySettings: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case sound, speech, hourly, launchAtLogin, notificationsAsked
+        case pomoTick, cardTrend, cardCalendar, cardBreath
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sound = try c.decodeIfPresent(Bool.self, forKey: .sound) ?? true
+        speech = try c.decodeIfPresent(Bool.self, forKey: .speech) ?? false
+        hourly = try c.decodeIfPresent(Bool.self, forKey: .hourly) ?? false
+        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        notificationsAsked = try c.decodeIfPresent(Bool.self, forKey: .notificationsAsked) ?? false
+        pomoTick = try c.decodeIfPresent(Bool.self, forKey: .pomoTick) ?? true
+        cardTrend = try c.decodeIfPresent(Bool.self, forKey: .cardTrend) ?? true
+        cardCalendar = try c.decodeIfPresent(Bool.self, forKey: .cardCalendar) ?? true
+        cardBreath = try c.decodeIfPresent(Bool.self, forKey: .cardBreath) ?? true
+    }
 }
 
 enum NotifStatus {

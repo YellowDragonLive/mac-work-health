@@ -9,27 +9,122 @@ struct ContentView: View {
 
     private let WEEK = ["日", "一", "二", "三", "四", "五", "六"]
 
+    // MARK: - Tab 架构
+    enum AppTab: String, CaseIterable {
+        case today, focus, record, settings
+        var title: String {
+            switch self {
+            case .today: return "今天"
+            case .focus: return "专注"
+            case .record: return "记录"
+            case .settings: return "设置"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .today: return "bolt.fill"
+            case .focus: return "timer"
+            case .record: return "chart.bar.fill"
+            case .settings: return "gearshape.fill"
+            }
+        }
+    }
+
+    @State private var activeTab: AppTab = .today
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 5)) { timeline in
-            let date = timeline.date
-            ScrollView {
-                VStack(spacing: 12) {
-                    header(date: date)
-                    nowCard
-                    checklistCard
-                    metricsCard
-                    trendCard
-                    calendarCard
-                    pomoCard
-                    settingsCard
-                    breathCard
-                    footer
+            VStack(spacing: 0) {
+                header(date: timeline.date)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 8)
+                Rectangle()
+                    .fill(Color.white.opacity(0.07))
+                    .frame(height: 0.5)
+                ScrollView {
+                    tabContent
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                tabBar
+                    .padding(.top, 8)
+                    .padding(.bottom, 12)
             }
             .overlay(alignment: .top) { bannerOverlay }
         }
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch activeTab {
+        case .today:
+            VStack(spacing: 12) {
+                nowCard
+                checklistCard
+            }
+        case .focus:
+            VStack(spacing: 12) {
+                pomoCard
+                if store.settings.cardBreath { breathCard }
+            }
+        case .record:
+            VStack(spacing: 12) {
+                metricsCard
+                if store.settings.cardTrend { trendCard }
+                if store.settings.cardCalendar { calendarCard }
+            }
+        case .settings:
+            VStack(spacing: 12) {
+                settingsCard
+                customizeCard
+                footer
+            }
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases, id: \.self) { tab in
+                tabButton(tab)
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(Color.black.opacity(0.35)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08)))
+        .padding(.horizontal, 16)
+    }
+
+    private func tabButton(_ tab: AppTab) -> some View {
+        let isActive = activeTab == tab
+        return Button(action: { activeTab = tab }) {
+            VStack(spacing: 2) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 13, weight: .semibold))
+                if tab == .focus && store.pomo.state.running {
+                    // 运行中：专注 tab 的文字换成倒计时角标
+                    Text(store.pomo.timeText())
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(.gold)
+                } else {
+                    Text(tab.title)
+                        .font(.system(size: 9, weight: isActive ? .bold : .regular))
+                }
+            }
+            .foregroundColor(isActive ? Color(hex: 0x1a1206) : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .background(
+                Capsule().fill(
+                    isActive
+                    ? AnyShapeStyle(LinearGradient(colors: [.gold, .amberC],
+                                                   startPoint: .leading, endPoint: .trailing))
+                    : AnyShapeStyle(Color.clear)
+                )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: 头部（时钟 + 日期 + 时段 + 隐藏按钮）
@@ -655,6 +750,50 @@ struct ContentView: View {
         }
     }
 
+    // MARK: 界面模块自定义（卡片显隐）
+    private var customizeCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("🎨 界面模块")
+                    .font(.system(size: 12.5, weight: .bold))
+                Spacer()
+                Text("不用的模块直接隐藏")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+            }
+            ToggleRow(
+                icon: "📈",
+                title: "近 7 天趋势",
+                subtitle: "记录页折线图",
+                isOn: Binding(
+                    get: { store.settings.cardTrend },
+                    set: { v in store.setSettings { $0.cardTrend = v } }
+                )
+            )
+            ToggleRow(
+                icon: "📅",
+                title: "月历打卡",
+                subtitle: "记录页日历",
+                isOn: Binding(
+                    get: { store.settings.cardCalendar },
+                    set: { v in store.setSettings { $0.cardCalendar = v } }
+                )
+            )
+            ToggleRow(
+                icon: "🫁",
+                title: "呼吸练习",
+                subtitle: "专注页 4-7-8",
+                isOn: Binding(
+                    get: { store.settings.cardBreath },
+                    set: { v in store.setSettings { $0.cardBreath = v } }
+                )
+            )
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.08)))
+    }
+
     // MARK: 月历打卡
     @State private var calAnchor = Date()
     @State private var selectedDate = Date()
@@ -1026,6 +1165,15 @@ struct ContentView: View {
                         store.setSettings { $0.sound = v }
                         if v { AppDelegate.playGlass() }
                     }
+                )
+            )
+            ToggleRow(
+                icon: "🕰️",
+                title: "番茄钟滴答声",
+                subtitle: "专注运行中每秒一声",
+                isOn: Binding(
+                    get: { store.settings.pomoTick },
+                    set: { v in store.setSettings { $0.pomoTick = v } }
                 )
             )
         }

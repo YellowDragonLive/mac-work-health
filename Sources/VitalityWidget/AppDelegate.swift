@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var panel: VitalityPanel?
     private var statusItem: NSStatusItem?
     private let synthesizer = NSSpeechSynthesizer()
+    private var tickSound: NSSound?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store = VitalityStore()
@@ -40,6 +41,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.tick()
         }
         tick()
+
+        // 番茄钟滴答声：运行时合成一个短促的秒针音
+        tickSound = Self.makeTickSound()
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.tickTick()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -153,8 +160,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     // MARK: - 声音 / 语音
+    static func playSound(named name: String) {
+        if let s = NSSound(named: name) { s.play() } else { NSSound.beep() }
+    }
+
     static func playGlass() {
-        if let s = NSSound(named: "Glass") { s.play() } else { NSSound.beep() }
+        playSound(named: "Glass")
+    }
+
+    /// 合成 40ms 的机械秒针滴答声（2.6kHz 正弦 + 快速衰减），写入临时 wav
+    static func makeTickSound() -> NSSound? {
+        let sampleRate = 44100
+        let count = Int(0.04 * Double(sampleRate))
+        var data = Data()
+
+        func le16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+        func le32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+
+        data.append("RIFF".data(using: .ascii)!)
+        le32(UInt32(36 + count * 2))
+        data.append("WAVE".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii)!)
+        le32(16); le16(1); le16(1)
+        le32(UInt32(sampleRate)); le32(UInt32(sampleRate * 2)); le16(2); le16(16)
+        data.append("data".data(using: .ascii)!)
+        le32(UInt32(count * 2))
+
+        for i in 0..<count {
+            let t = Double(i) / Double(sampleRate)
+            let env = exp(-t * 160)
+            let v = sin(2 * .pi * 2600 * t) * env * 0.22
+            le16(UInt16(bitPattern: Int16(v * Double(Int16.max))))
+        }
+
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("vitality-tick.wav")
+        do {
+            try data.write(to: url)
+            return NSSound(contentsOf: url, byReference: false)
+        } catch {
+            return nil
+        }
+    }
+
+    private func tickTick() {
+        let s = store.pomo.state
+        guard s.running, s.phase == .focus, store.settings.pomoTick else { return }
+        if let t = tickSound {
+            t.play()
+        } else {
+            NSSound.beep()
+        }
     }
 
     private func speakZH(_ text: String) {
@@ -178,7 +233,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             msg = "🌅 长休结束，新周期开始"
         }
         store.showBanner(msg)
-        if store.settings.sound { AppDelegate.playGlass() }
+        if store.settings.sound {
+            switch ended {
+            case .focus:
+                AppDelegate.playSound(named: "Glass")   // 专注结束：清脆玻璃声
+            case .shortBreak, .longBreak:
+                AppDelegate.playSound(named: "Hero")    // 休息结束：开工号角
+            }
+        }
         if store.settings.speech { speakZH(msg) }
         postPomoNotification(msg)
     }
