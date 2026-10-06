@@ -761,6 +761,18 @@ struct ContentView: View {
             }
 
             ToggleRow(
+                icon: "🚀",
+                title: "开机自动启动",
+                subtitle: "登录 macOS 后自动出现挂件",
+                isOn: Binding(
+                    get: { store.settings.launchAtLogin },
+                    set: { v in
+                        store.setSettings { $0.launchAtLogin = v }
+                        LoginItemManager.setEnabled(v)
+                    }
+                )
+            )
+            ToggleRow(
                 icon: "🧍",
                 title: "每小时起身提醒",
                 subtitle: "9:00–21:00 整点",

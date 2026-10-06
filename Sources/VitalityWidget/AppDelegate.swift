@@ -21,6 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.pomoDidFinish(ended)
         }
 
+        // 自愈：偏好里开了自启动但系统注册丢了（如应用重装/更新），启动时补注册
+        if store.settings.launchAtLogin, !LoginItemManager.isEnabled {
+            LoginItemManager.setEnabled(true)
+        }
+
         makePanel()
         makeStatusItem()
 

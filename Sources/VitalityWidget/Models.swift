@@ -53,6 +53,7 @@ struct VitalitySettings: Codable, Equatable {
     var sound = true
     var speech = false
     var hourly = false
+    var launchAtLogin = false
     var notificationsAsked = false
 }
 
