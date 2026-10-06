@@ -178,10 +178,26 @@ struct ContentView: View {
         let isDone = current.map { store.done.contains($0.id) } ?? false
 
         return VStack(alignment: .leading, spacing: 7) {
-            Text("现在该做")
-                .font(.system(size: 10.5, weight: .bold))
-                .kerning(3)
-                .foregroundColor(.gold)
+            HStack {
+                Text("现在该做")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .kerning(3)
+                    .foregroundColor(.gold)
+                Spacer()
+                let streak = store.computeStreak()
+                if streak > 0 {
+                    Text("🔥 连续 \(streak) 天")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(.amberC)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().strokeBorder(Color.amberC.opacity(0.4))
+                                .background(Capsule().fill(Color.amberC.opacity(0.08)))
+                        )
+                        .help("有任何记录就算打卡：清单/测量/番茄/饮水")
+                }
+            }
 
             HStack(alignment: .top, spacing: 10) {
                 Text(current?.label ?? "清单从明天 07:00 开始，先睡好这一觉")
@@ -310,6 +326,8 @@ struct ContentView: View {
     // MARK: 今日测量（体重 / 血压 / 睡眠）
     private var metricsCard: some View {
         let m = store.metricsText.parsed
+        let waterGoal = store.waterGoalGlasses
+        let waterOK = store.waterGlasses >= waterGoal
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("📊 今日测量")
@@ -399,7 +417,48 @@ struct ContentView: View {
                 Spacer()
             }
 
-            Text("血压建议静坐 5 分钟后测 · 睡眠按昨晚实际时长填")
+            // 饮水
+            HStack(spacing: 8) {
+                Text("🚰 饮水")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .frame(width: 62, alignment: .leading)
+                Button(action: { store.addWater(-1) }) {
+                    Image(systemName: "minus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                VStack(spacing: 3) {
+                    Text(waterOK ? "✓ 已达标 · \(store.waterGlasses) 杯" : "\(store.waterGlasses) / \(waterGoal) 杯")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(waterOK ? .mintC : .secondary)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.1))
+                            Capsule()
+                                .fill(Color.skyC)
+                                .frame(width: geo.size.width * CGFloat(min(1, Double(store.waterGlasses) / Double(waterGoal))))
+                        }
+                    }
+                    .frame(height: 4)
+                }
+                .frame(maxWidth: .infinity)
+                Button(action: { store.addWater(1) }) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: 0x1a1206))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle().fill(LinearGradient(colors: [.gold, .amberC],
+                                                         startPoint: .leading, endPoint: .trailing))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("血压建议静坐 5 分钟后测 · 睡眠按昨晚实际时长填 · 饮水每杯按 250ml 计")
                 .font(.system(size: 9))
                 .foregroundColor(Color.white.opacity(0.22))
         }
@@ -876,6 +935,7 @@ struct ContentView: View {
         var tomatoes: Bool
         var doneCount: Int
         var tomatoCount: Int
+        var waterGlasses: Int
         var metricsVal: VitalityMetrics
     }
 
@@ -885,7 +945,8 @@ struct ContentView: View {
             let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
             let tc = store.pomo.state.todayTomatoes
             return DayInfo(metrics: hasM, checklist: !store.done.isEmpty, tomatoes: tc > 0,
-                           doneCount: store.done.count, tomatoCount: tc, metricsVal: mv)
+                           doneCount: store.done.count, tomatoCount: tc,
+                           waterGlasses: store.waterGlasses, metricsVal: mv)
         }
         let h = historyMap[VitalityStore.isoKey(d)]
         let mv = VitalityMetrics(weight: h?.weight, sys: h?.sys, dia: h?.dia,
@@ -893,8 +954,9 @@ struct ContentView: View {
         let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
         let dc = h?.doneCount ?? 0
         let tc = h?.tomatoes ?? 0
+        let wg = h?.waterGlasses ?? 0
         return DayInfo(metrics: hasM, checklist: dc > 0, tomatoes: tc > 0,
-                       doneCount: dc, tomatoCount: tc, metricsVal: mv)
+                       doneCount: dc, tomatoCount: tc, waterGlasses: wg, metricsVal: mv)
     }
 
     @ViewBuilder
@@ -967,6 +1029,9 @@ struct ContentView: View {
                 }
                 if st.tomatoCount > 0 {
                     detailRow("🍅", "番茄", "\(st.tomatoCount) 个")
+                }
+                if st.waterGlasses > 0 {
+                    detailRow("🚰", "饮水", "\(st.waterGlasses) 杯（约 \(st.waterGlasses * 250) ml）")
                 }
             } else {
                 Text("这一天没有记录")
@@ -1176,6 +1241,43 @@ struct ContentView: View {
                     set: { v in store.setSettings { $0.pomoTick = v } }
                 )
             )
+
+            if store.dndActive {
+                HStack {
+                    Text("🤫 免打扰中 · 剩 \(store.dndRemainingMin) 分钟")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(.amberC)
+                    Spacer()
+                    Button(action: {
+                        store.clearDND()
+                        store.showBanner("提醒已恢复 🔔")
+                    }) {
+                        Text("恢复提醒")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 9).fill(Color.amberC.opacity(0.06)))
+            } else {
+                Button(action: {
+                    store.setDND(seconds: 3600)
+                    store.showBanner("已开启免打扰 1 小时 🤫 到点自动恢复")
+                }) {
+                    Text("🔕 暂停提醒 1 小时（开会 / 深度专注时用）")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(0.05)))
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))

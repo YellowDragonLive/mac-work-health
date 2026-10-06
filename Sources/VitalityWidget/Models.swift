@@ -59,13 +59,14 @@ struct VitalitySettings: Equatable {
     var cardTrend = true        // 卡片显隐：近 7 天趋势
     var cardCalendar = true     // 卡片显隐：月历打卡
     var cardBreath = true       // 卡片显隐：呼吸练习
+    var dndUntil: Double? = nil // 免打扰截止时刻（epoch 秒），期间暂停任务/整点提醒
 }
 
 // 自定义解码 + 自动编码；老配置缺新字段时用默认值，而不是整个重置
 extension VitalitySettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case sound, speech, hourly, launchAtLogin, notificationsAsked
-        case pomoTick, cardTrend, cardCalendar, cardBreath
+        case pomoTick, cardTrend, cardCalendar, cardBreath, dndUntil
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +80,7 @@ extension VitalitySettings: Codable {
         cardTrend = try c.decodeIfPresent(Bool.self, forKey: .cardTrend) ?? true
         cardCalendar = try c.decodeIfPresent(Bool.self, forKey: .cardCalendar) ?? true
         cardBreath = try c.decodeIfPresent(Bool.self, forKey: .cardBreath) ?? true
+        dndUntil = try c.decodeIfPresent(Double.self, forKey: .dndUntil) ?? nil
     }
 }
 
@@ -157,7 +159,18 @@ struct HistoryDay: Codable, Equatable {
     var sleepMinutes: Int?
     var doneCount: Int?        // 当天完成清单数
     var tomatoes: Int?         // 当天完成番茄数
+    var waterGlasses: Int?      // 当天饮水杯数（每杯 250ml）
 }
+
+// MARK: - 整点起身提醒轮换的拉伸动作库
+let STRETCH_TIPS = [
+    "颈部：缓慢左右转头各 5 次",
+    "肩部环绕 10 次，顺便喝口水",
+    "靠墙静蹲 30 秒",
+    "远眺窗外 20 秒 + 用力眨眼 10 次",
+    "双手上举，向两侧弯腰各 10 秒",
+    "走楼梯或快走 2 分钟，唤醒下肢"
+]
 
 // MARK: - 全局状态存储（本机持久化，跨天自动重置）
 final class VitalityStore: ObservableObject {
@@ -165,6 +178,7 @@ final class VitalityStore: ObservableObject {
         let day: String
         let done: [String]
         var metrics: VitalityMetrics?
+        var waterGlasses: Int?
     }
 
     @Published var dayKey: String
@@ -173,6 +187,7 @@ final class VitalityStore: ObservableObject {
     @Published var banner: String?
     @Published var notifStatus: NotifStatus = .unknown
     @Published var metricsText = MetricsText()
+    @Published var waterGlasses = 0
     @Published private(set) var history: [HistoryDay] = []
     private(set) var metrics = VitalityMetrics()
 
@@ -201,6 +216,7 @@ final class VitalityStore: ObservableObject {
            s.day == today {
             dayKey = today
             done = Set(s.done)
+            waterGlasses = s.waterGlasses ?? 0
             if let m = s.metrics {
                 metrics = m
                 metricsText = MetricsText.from(m)
@@ -234,11 +250,16 @@ final class VitalityStore: ObservableObject {
 
     private func persistState() {
         syncHistoryToday()
-        let s = PersistedState(day: dayKey, done: Array(done), metrics: metrics)
+        let s = PersistedState(day: dayKey, done: Array(done), metrics: metrics, waterGlasses: waterGlasses)
         if let data = try? JSONEncoder().encode(s), let raw = String(data: data, encoding: .utf8) {
             defaults.set(raw, forKey: "vitality.state")
         }
         persistHistory()
+    }
+
+    /// 供外部（如番茄钟完成回调）把当天快照落盘，保证 streak 不漏记
+    func syncTodaySnapshot() {
+        persistState()
     }
 
     /// 把当天的测量与打卡写入历史（同一天覆盖，最多留 90 天）
@@ -251,7 +272,8 @@ final class VitalityStore: ObservableObject {
             dia: metrics.dia,
             sleepMinutes: metrics.sleepMinutes,
             doneCount: done.count,
-            tomatoes: pomo.state.todayTomatoes
+            tomatoes: pomo.state.todayTomatoes,
+            waterGlasses: waterGlasses
         )
         if let i = history.firstIndex(where: { $0.date == key }) {
             history[i] = entry
@@ -315,30 +337,95 @@ final class VitalityStore: ObservableObject {
         fired = []
         metrics = VitalityMetrics()
         metricsText = MetricsText()
+        waterGlasses = 0
         markFarPastAsFired()
         persistState()
         return true
     }
 
-    /// 到点 30 分钟内、未完成、未提醒过 → 触发（由 AppDelegate 每 30 秒轮询）
+    // MARK: 饮水
+    func addWater(_ delta: Int) {
+        waterGlasses = max(0, min(20, waterGlasses + delta))
+        persistState()
+    }
+
+    /// 每杯按 250ml；有体重时按 35ml/kg 自动算目标，否则默认 8 杯
+    var waterGoalGlasses: Int {
+        if let w = metrics.weight, w > 30 {
+            return max(6, min(14, Int((w * 35.0 / 250.0).rounded(.up))))
+        }
+        return 8
+    }
+
+    // MARK: 连续打卡 streak
+    private func hasActivityOn(offsetDays offset: Int) -> Bool {
+        guard let d = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) else { return false }
+        if offset == 0 {
+            return !done.isEmpty || waterGlasses > 0 || pomo.state.todayTomatoes > 0
+                || metrics.weight != nil || metrics.sys != nil || metrics.dia != nil || metrics.sleepMinutes != nil
+        }
+        let iso = VitalityStore.isoKey(d)
+        guard let h = history.first(where: { $0.date == iso }) else { return false }
+        return (h.doneCount ?? 0) > 0 || (h.tomatoes ?? 0) > 0 || (h.waterGlasses ?? 0) > 0
+            || h.weight != nil || h.sys != nil || h.dia != nil || h.sleepMinutes != nil
+    }
+
+    /// 今天有活动算今天；没活动则从昨天起算——streak 只有隔一整天空窗才断
+    func computeStreak() -> Int {
+        var streak = 0
+        if hasActivityOn(offsetDays: 0) { streak += 1 }
+        var offset = 1
+        while hasActivityOn(offsetDays: offset) {
+            streak += 1
+            offset += 1
+        }
+        return streak
+    }
+
+    // MARK: 免打扰
+    var dndActive: Bool {
+        if let u = settings.dndUntil { return Date().timeIntervalSince1970 < u }
+        return false
+    }
+
+    var dndRemainingMin: Int {
+        if let u = settings.dndUntil { return max(0, Int(ceil((u - Date().timeIntervalSince1970) / 60))) }
+        return 0
+    }
+
+    func setDND(seconds: Double) {
+        settings.dndUntil = Date().timeIntervalSince1970 + seconds
+        persistSettings()
+        onReschedule?()
+    }
+
+    func clearDND() {
+        settings.dndUntil = nil
+        persistSettings()
+        onReschedule?()
+    }
+
+    /// 到点 30 分钟内、未完成、未提醒过 → 触发（由 AppDelegate 每 30 秒轮询）；免打扰期间静音
     func dueReminders() -> [String] {
         var out: [String] = []
         let n = nowMinutes()
 
-        for t in TASKS where !done.contains(t.id) && !fired.contains(t.id) {
-            if n >= t.minutes && n < t.minutes + 30 {
-                fired.insert(t.id)
-                out.append("\(t.id) · \(t.label)")
+        if !dndActive {
+            for t in TASKS where !done.contains(t.id) && !fired.contains(t.id) {
+                if n >= t.minutes && n < t.minutes + 30 {
+                    fired.insert(t.id)
+                    out.append("\(t.id) · \(t.label)")
+                }
             }
-        }
 
-        if settings.hourly {
-            let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-            if let h = c.hour, (9...21).contains(h), (c.minute ?? 60) < 5 {
-                let key = "hour-\(h)"
-                if !fired.contains(key) {
-                    fired.insert(key)
-                    out.append("整点提醒 · 起身活动 2 分钟，顺便喝水 🧍")
+            if settings.hourly {
+                let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
+                if let h = c.hour, (9...21).contains(h), (c.minute ?? 60) < 5 {
+                    let key = "hour-\(h)"
+                    if !fired.contains(key) {
+                        fired.insert(key)
+                        out.append("整点提醒 · 起身：" + STRETCH_TIPS[h % STRETCH_TIPS.count])
+                    }
                 }
             }
         }

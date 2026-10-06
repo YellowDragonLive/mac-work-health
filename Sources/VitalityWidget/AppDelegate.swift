@@ -142,6 +142,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if store.rollDayIfNeeded() {
             rescheduleNotifications()
         }
+
+        // 免打扰到期自动恢复
+        if let until = store.settings.dndUntil, Date().timeIntervalSince1970 >= until {
+            store.clearDND()
+            store.showBanner("提醒已恢复 🔔")
+        }
+
         for msg in store.dueReminders() {
             deliverInApp(msg)
         }
@@ -243,6 +250,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         if store.settings.speech { speakZH(msg) }
         postPomoNotification(msg)
+        // 番茄计入当天历史，streak 与月历立刻可见
+        store.syncTodaySnapshot()
     }
 
     private func postPomoNotification(_ msg: String) {
@@ -294,6 +303,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         center.getNotificationSettings { [weak self] s in
             DispatchQueue.main.async {
                 guard let self = self, s.authorizationStatus == .authorized else { return }
+                // 免打扰期间不建触发器（恢复时会重建）
+                guard !self.store.dndActive else { return }
 
                 for t in TASKS where !self.store.done.contains(t.id) {
                     let content = UNMutableNotificationContent()
@@ -313,7 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     for h in 9...21 {
                         let content = UNMutableNotificationContent()
                         content.title = "⚡ 今日精力"
-                        content.body = "整点提醒 · 起身活动 2 分钟，顺便喝水 🧍"
+                        content.body = "整点起身 · " + STRETCH_TIPS[h % STRETCH_TIPS.count]
                         if self.store.settings.sound { content.sound = .default }
                         var comps = DateComponents()
                         comps.hour = h
