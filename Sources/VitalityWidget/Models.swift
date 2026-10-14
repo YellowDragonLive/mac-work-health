@@ -26,6 +26,7 @@ struct VitalityTask: Identifiable {
     let id: String      // "07:30"
     let label: String
     let speech: String
+    let short: String   // 打卡矩阵用的短名
 
     var minutes: Int {
         let p = id.split(separator: ":").compactMap { Int($0) }
@@ -35,17 +36,17 @@ struct VitalityTask: Identifiable {
 }
 
 let TASKS: [VitalityTask] = [
-    .init(id: "07:00", label: "固定起床 · 先喝 300ml 温水",    speech: "到点了，固定起床，先喝三百毫升温水。"),
-    .init(id: "07:30", label: "晨光下散步 / 拉伸 10 分钟",       speech: "去晒十分钟晨光，散步或拉伸都可以。"),
-    .init(id: "08:30", label: "起床 90 分钟后 · 第一杯咖啡",    speech: "现在可以喝今天第一杯咖啡了。"),
-    .init(id: "09:00", label: "黄金时段 · 攻最难的一件事",      speech: "黄金时段开始，去处理最难的那件事。"),
-    .init(id: "12:30", label: "午餐七分饱 · 饭后走 10 分钟",     speech: "午餐七分饱，饭后走十分钟。"),
-    .init(id: "13:00", label: "小睡 20 分钟（别超 30）",         speech: "午间小睡二十分钟，别超过三十分钟。"),
-    .init(id: "14:00", label: "咖啡因停杯",                      speech: "下午两点了，咖啡因到此为止。"),
-    .init(id: "15:00", label: "起身活动 3 分钟 · 补水",          speech: "起来活动三分钟，喝点水。"),
-    .init(id: "18:00", label: "30 分钟有氧 / 力量训练",          speech: "运动三十分钟，有氧或力量都行。"),
-    .init(id: "21:30", label: "屏幕断电 · 睡前仪式",             speech: "屏幕该断电了，进入睡前仪式。"),
-    .init(id: "22:30", label: "上床 · 保证 7–9 小时睡眠",        speech: "该上床了，晚安。")
+    .init(id: "07:00", label: "固定起床 · 先喝 300ml 温水",    speech: "到点了，固定起床，先喝三百毫升温水。", short: "起床喝水"),
+    .init(id: "07:30", label: "晨光下散步 / 拉伸 10 分钟",       speech: "去晒十分钟晨光，散步或拉伸都可以。", short: "晨光"),
+    .init(id: "08:30", label: "起床 90 分钟后 · 第一杯咖啡",    speech: "现在可以喝今天第一杯咖啡了。", short: "咖啡"),
+    .init(id: "09:00", label: "黄金时段 · 攻最难的一件事",      speech: "黄金时段开始，去处理最难的那件事。", short: "深度工作"),
+    .init(id: "12:30", label: "午餐七分饱 · 饭后走 10 分钟",     speech: "午餐七分饱，饭后走十分钟。", short: "午餐"),
+    .init(id: "13:00", label: "小睡 20 分钟（别超 30）",         speech: "午间小睡二十分钟，别超过三十分钟。", short: "午睡"),
+    .init(id: "14:00", label: "咖啡因停杯",                      speech: "下午两点了，咖啡因到此为止。", short: "停咖啡"),
+    .init(id: "15:00", label: "起身活动 3 分钟 · 补水",          speech: "起来活动三分钟，喝点水。", short: "起身"),
+    .init(id: "18:00", label: "30 分钟有氧 / 力量训练",          speech: "运动三十分钟，有氧或力量都行。", short: "运动"),
+    .init(id: "21:30", label: "屏幕断电 · 睡前仪式",             speech: "屏幕该断电了，进入睡前仪式。", short: "断电"),
+    .init(id: "22:30", label: "上床 · 保证 7–9 小时睡眠",        speech: "该上床了，晚安。", short: "上床")
 ]
 
 // MARK: - 设置
@@ -160,6 +161,9 @@ struct HistoryDay: Codable, Equatable {
     var doneCount: Int?        // 当天完成清单数
     var tomatoes: Int?         // 当天完成番茄数
     var waterGlasses: Int?      // 当天饮水杯数（每杯 250ml）
+    var doneIds: [String]?      // 当天具体完成的任务 id（补卡用）
+
+    var doneSet: Set<String> { Set(doneIds ?? []) }
 }
 
 // MARK: - 整点起身提醒轮换的拉伸动作库
@@ -273,7 +277,8 @@ final class VitalityStore: ObservableObject {
             sleepMinutes: metrics.sleepMinutes,
             doneCount: done.count,
             tomatoes: pomo.state.todayTomatoes,
-            waterGlasses: waterGlasses
+            waterGlasses: waterGlasses,
+            doneIds: Array(done)
         )
         if let i = history.firstIndex(where: { $0.date == key }) {
             history[i] = entry
@@ -380,6 +385,56 @@ final class VitalityStore: ObservableObject {
             offset += 1
         }
         return streak
+    }
+
+    /// 补卡：切换某个历史日期某任务的完成状态（仅限历史快照，不改今天）
+    func toggleHistoryDone(_ isoDate: String, taskId: String) {
+        guard isoDate != VitalityStore.isoKey() else { return }
+        if let i = history.firstIndex(where: { $0.date == isoDate }) {
+            var ids = history[i].doneSet
+            if ids.contains(taskId) { ids.remove(taskId) } else { ids.insert(taskId) }
+            history[i].doneIds = Array(ids)
+            history[i].doneCount = ids.count
+        } else {
+            history.append(HistoryDay(date: isoDate, weight: nil, sys: nil, dia: nil,
+                                      sleepMinutes: nil, doneCount: 1, tomatoes: 0,
+                                      waterGlasses: 0, doneIds: [taskId]))
+            history.sort { $0.date < $1.date }
+        }
+        persistHistory()
+    }
+
+    /// 某任务截至今天（或昨天）的连续完成天数
+    func taskStreak(_ taskId: String) -> Int {
+        var streak = 0
+        if done.contains(taskId) { streak += 1 }
+        var offset = 1
+        while offset <= 90 {
+            guard let d = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) else { break }
+            let iso = VitalityStore.isoKey(d)
+            if let h = history.first(where: { $0.date == iso }), h.doneSet.contains(taskId) {
+                streak += 1
+                offset += 1
+            } else {
+                break
+            }
+        }
+        return streak
+    }
+
+    /// 某天清单完成率（0–1），今天取实时
+    func dayDoneRatio(_ d: Date) -> Double {
+        let total = TASKS.count
+        guard total > 0 else { return 0 }
+        let cnt: Int
+        if Calendar.current.isDateInToday(d) {
+            cnt = done.count
+        } else if let h = history.first(where: { $0.date == VitalityStore.isoKey(d) }) {
+            cnt = h.doneCount ?? h.doneSet.count
+        } else {
+            cnt = 0
+        }
+        return Double(cnt) / Double(total)
     }
 
     // MARK: 免打扰

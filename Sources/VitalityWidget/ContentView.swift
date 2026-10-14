@@ -71,6 +71,7 @@ struct ContentView: View {
         case .record:
             VStack(spacing: 12) {
                 metricsCard
+                matrixCard
                 if store.settings.cardTrend { trendCard }
                 if store.settings.cardCalendar { calendarCard }
             }
@@ -851,6 +852,169 @@ struct ContentView: View {
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.08)))
+    }
+
+    // MARK: 近 7 日打卡矩阵（可补卡）
+    private var last7Dates: [Date] {
+        (0..<7).reversed().compactMap {
+            Calendar.current.date(byAdding: .day, value: -$0, to: Date())
+        }
+    }
+
+    private func isDone(_ task: VitalityTask, on d: Date) -> Bool {
+        if Calendar.current.isDateInToday(d) { return store.done.contains(task.id) }
+        guard let h = historyMap[VitalityStore.isoKey(d)] else { return false }
+        if let ids = h.doneIds { return ids.contains(task.id) }
+        return false
+    }
+
+    private var matrixCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            matrixHeader
+            matrixGrid
+            matrixRateChart
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.08)))
+    }
+
+    private var matrixHeader: some View {
+        let dates = last7Dates
+        let weekAvg = dates.map { store.dayDoneRatio($0) }.reduce(0, +) / Double(dates.count)
+        return HStack {
+            Text("🗓️ 近 7 日打卡矩阵")
+                .font(.system(size: 12.5, weight: .bold))
+            Spacer()
+            Text("本周达成 \(Int(weekAvg * 100))%")
+                .font(.system(size: 9.5))
+                .foregroundColor(.mintC)
+        }
+    }
+
+    private var matrixGrid: some View {
+        let dates = last7Dates
+        return VStack(alignment: .leading, spacing: 8) {
+            matrixHeaderRow(dates: dates)
+            VStack(spacing: 0) {
+                ForEach(TASKS) { t in
+                    matrixRow(t, dates: dates)
+                }
+            }
+        }
+    }
+
+    // 表头
+    private func matrixHeaderRow(dates: [Date]) -> some View {
+        HStack(spacing: 3) {
+            Text("任务")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.secondary)
+                .frame(width: 72, alignment: .leading)
+            ForEach(dates, id: \.self) { d in
+                VStack(spacing: 1) {
+                    Text(["日", "一", "二", "三", "四", "五", "六"][Calendar.current.component(.weekday, from: d) - 1])
+                        .font(.system(size: 8.5))
+                    Text("\(Calendar.current.component(.day, from: d))")
+                        .font(.system(size: 8))
+                }
+                .foregroundColor(Calendar.current.isDateInToday(d) ? .gold : .secondary)
+                .frame(maxWidth: .infinity)
+            }
+            Text("🔥")
+                .font(.system(size: 9))
+                .frame(width: 26)
+        }
+    }
+
+    // 每日完成率迷你柱状
+    private var matrixRateChart: some View {
+        let dates = last7Dates
+        return HStack(spacing: 3) {
+            Text("完成率")
+                .font(.system(size: 8.5))
+                .foregroundColor(.secondary)
+                .frame(width: 72, alignment: .leading)
+            ForEach(dates, id: \.self) { d in
+                matrixRateBar(d)
+            }
+            Color.clear.frame(width: 26)
+        }
+        .padding(.top, 4)
+    }
+
+    private func matrixRateBar(_ d: Date) -> some View {
+        let ratio = store.dayDoneRatio(d)
+        return VStack(spacing: 2) {
+            GeometryReader { geo in
+                ZStack(alignment: .bottom) {
+                    Capsule().fill(Color.white.opacity(0.07))
+                    Capsule()
+                        .fill(ratio >= 1 ? Color.mintC : Color.skyC)
+                        .frame(height: geo.size.height * CGFloat(ratio))
+                }
+            }
+            Text("\(Int(ratio * 100))")
+                .font(.system(size: 7.5, weight: .semibold))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 34)
+    }
+
+    private func matrixRow(_ t: VitalityTask, dates: [Date]) -> some View {
+        HStack(spacing: 3) {
+            matrixRowName(t)
+            ForEach(dates, id: \.self) { d in
+                matrixCell(t, d)
+            }
+            matrixStreak(t)
+        }
+        .padding(.vertical, 2.5)
+    }
+
+    private func matrixRowName(_ t: VitalityTask) -> some View {
+        Text(t.short)
+            .font(.system(size: 9.5, weight: .medium))
+            .lineLimit(1)
+            .frame(width: 72, alignment: .leading)
+            .help(t.label)
+    }
+
+    private func matrixStreak(_ t: VitalityTask) -> some View {
+        let streak = store.taskStreak(t.id)
+        return Text(streak > 0 ? "\(streak)" : "–")
+            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+            .foregroundColor(streak > 0 ? .amberC : .secondary)
+            .frame(width: 26)
+    }
+
+    private func matrixCell(_ t: VitalityTask, _ d: Date) -> some View {
+        let done = isDone(t, on: d)
+        let isToday = Calendar.current.isDateInToday(d)
+        let future = d > Date() && !isToday
+        return Button(action: {
+            if isToday {
+                store.toggle(t.id)
+            } else if !future {
+                store.toggleHistoryDone(VitalityStore.isoKey(d), taskId: t.id)
+            }
+        }) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(done ? Color.mintC.opacity(0.85) : Color.white.opacity(0.05))
+                if done {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(Color(hex: 0x06231c))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 22)
+            .opacity(future ? 0.25 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(future)
     }
 
     // MARK: 月历打卡
