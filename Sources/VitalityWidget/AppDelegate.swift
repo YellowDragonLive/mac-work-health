@@ -27,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             LoginItemManager.setEnabled(true)
         }
 
+        // 启动即归一化存储：老格式（done 数组 / 单个 sys-dia）迁移后立刻落盘
+        store.syncTodaySnapshot()
+
         makePanel()
         makeStatusItem()
 

@@ -92,19 +92,75 @@ enum NotifStatus {
 }
 
 // MARK: - 当日测量记录（体重 / 血压 / 睡眠）
+// 血压一天内波动大（晨峰 vs 午后），用多次读数而非单一值
+struct BPReading: Codable, Equatable, Identifiable {
+    var timestamp: Double   // epoch 秒
+    var sys: Int
+    var dia: Int
+    var id: String { String(format: "%.0f", timestamp * 1000) }
+
+    var timeText: String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: timestamp))
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+    }
+
+    var status: (String, Color) {
+        if sys >= 140 || dia >= 90 { return ("偏高 ⚠️", .roseC) }
+        if sys >= 130 || dia >= 85 { return ("偏高", .amberC) }
+        if sys >= 120 || dia >= 80 { return ("正常高值", .amberC) }
+        return ("正常", .mintC)
+    }
+}
+
+// 每个任务打卡带完成时间戳（几点完成的）
+struct DoneRecord: Codable, Equatable, Identifiable {
+    let taskId: String
+    let timestamp: Double   // epoch 秒
+    var id: String { taskId }
+    var timeText: String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: timestamp))
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+    }
+}
+
 struct VitalityMetrics: Codable, Equatable {
     var weight: Double?       // kg
-    var sys: Int?              // 收缩压（高压）
-    var dia: Int?              // 舒张压（低压）
+    var bpReadings: [BPReading] = []   // 一天多次血压读数
     var sleepMinutes: Int?     // 昨晚睡眠分钟数
-    var savedAt: Double? = nil // 最近一次记录的时刻（epoch 秒），用于“已记录”反馈
+    var savedAt: Double? = nil // 最近一次记录时刻（epoch 秒）
 
-    var bpStatus: (String, Color)? {
-        guard let s = sys, let d = dia, s > 0, d > 0 else { return nil }
-        if s >= 140 || d >= 90 { return ("偏高 ⚠️", .roseC) }
-        if s >= 130 || d >= 85 { return ("偏高", .amberC) }
-        if s >= 120 || d >= 80 { return ("正常高值", .amberC) }
-        return ("正常", .mintC)
+    var latestBP: BPReading? { bpReadings.max(by: { $0.timestamp < $1.timestamp }) }
+
+    var bpStatus: (String, Color)? { latestBP?.status }
+
+    private enum CodingKeys: String, CodingKey {
+        case weight, bpReadings, sleepMinutes, savedAt
+        case sysLegacy = "sys", diaLegacy = "dia"
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        weight = try c.decodeIfPresent(Double.self, forKey: .weight)
+        sleepMinutes = try c.decodeIfPresent(Int.self, forKey: .sleepMinutes)
+        savedAt = try c.decodeIfPresent(Double.self, forKey: .savedAt)
+        if let readings = try c.decodeIfPresent([BPReading].self, forKey: .bpReadings) {
+            bpReadings = readings
+        } else if let s = try c.decodeIfPresent(Int.self, forKey: .sysLegacy),
+                  let d = try c.decodeIfPresent(Int.self, forKey: .diaLegacy) {
+            bpReadings = [BPReading(timestamp: savedAt ?? Date().timeIntervalSince1970, sys: s, dia: d)]
+        } else {
+            bpReadings = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(weight, forKey: .weight)
+        try c.encodeIfPresent(sleepMinutes, forKey: .sleepMinutes)
+        try c.encodeIfPresent(savedAt, forKey: .savedAt)
+        if !bpReadings.isEmpty { try c.encode(bpReadings, forKey: .bpReadings) }
     }
 
     var sleepStatus: (String, Color)? {
@@ -123,26 +179,23 @@ struct VitalityMetrics: Codable, Equatable {
 
 struct MetricsText: Equatable {
     var weight = ""
-    var sys = ""
-    var dia = ""
     var sleepH = ""
     var sleepM = ""
 
     var parsed: VitalityMetrics {
         let w = Double(weight)
-        let s = Int(sys)
-        let d = Int(dia)
         let h = Int(sleepH)
         let m = Int(sleepM)
         let sleep = (h == nil && m == nil) ? nil : (h ?? 0) * 60 + (m ?? 0)
-        return VitalityMetrics(weight: w, sys: s, dia: d, sleepMinutes: sleep)
+        var v = VitalityMetrics()
+        v.weight = w
+        v.sleepMinutes = sleep
+        return v
     }
 
     static func from(_ m: VitalityMetrics) -> MetricsText {
         var t = MetricsText()
         if let w = m.weight { t.weight = w == w.rounded() ? String(Int(w)) : String(w) }
-        if let s = m.sys { t.sys = String(s) }
-        if let d = m.dia { t.dia = String(d) }
         if let sl = m.sleepMinutes {
             t.sleepH = String(sl / 60)
             if sl % 60 != 0 { t.sleepM = String(sl % 60) }
@@ -153,17 +206,86 @@ struct MetricsText: Equatable {
 
 // MARK: - 历史记录（每天一份快照，用于趋势图与月历打卡）
 struct HistoryDay: Codable, Equatable {
-    let date: String          // "2025-03-05"
+    let date: String
     var weight: Double?
-    var sys: Int?
-    var dia: Int?
+    var bpReadings: [BPReading]?
     var sleepMinutes: Int?
-    var doneCount: Int?        // 当天完成清单数
-    var tomatoes: Int?         // 当天完成番茄数
-    var waterGlasses: Int?      // 当天饮水杯数（每杯 250ml）
-    var doneIds: [String]?      // 当天具体完成的任务 id（补卡用）
+    var doneCount: Int?
+    var tomatoes: Int?
+    var waterGlasses: Int?
+    var doneRecords: [DoneRecord]?    // 带时间戳的完成记录
 
-    var doneSet: Set<String> { Set(doneIds ?? []) }
+    /// 旧字段兼容（只有 id 数组、无时间戳）
+    private enum CodingKeys: String, CodingKey {
+        case date, weight, bpReadings, sleepMinutes, doneCount, tomatoes, waterGlasses, doneRecords
+        case doneIdsLegacy = "doneIds"
+        case sysLegacy = "sys", diaLegacy = "dia"
+    }
+
+    init(date: String, weight: Double?, bpReadings: [BPReading]?, sleepMinutes: Int?,
+         doneCount: Int?, tomatoes: Int?, waterGlasses: Int?, doneRecords: [DoneRecord]?) {
+        self.date = date
+        self.weight = weight
+        self.bpReadings = bpReadings
+        self.sleepMinutes = sleepMinutes
+        self.doneCount = doneCount
+        self.tomatoes = tomatoes
+        self.waterGlasses = waterGlasses
+        self.doneRecords = doneRecords
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decode(String.self, forKey: .date)
+        weight = try c.decodeIfPresent(Double.self, forKey: .weight)
+        if let r = try c.decodeIfPresent([BPReading].self, forKey: .bpReadings) {
+            bpReadings = r
+        } else if let s = try c.decodeIfPresent(Int.self, forKey: .sysLegacy),
+                  let d = try c.decodeIfPresent(Int.self, forKey: .diaLegacy) {
+            bpReadings = [BPReading(timestamp: Date().timeIntervalSince1970, sys: s, dia: d)]
+        } else {
+            bpReadings = nil
+        }
+        sleepMinutes = try c.decodeIfPresent(Int.self, forKey: .sleepMinutes)
+        doneCount = try c.decodeIfPresent(Int.self, forKey: .doneCount)
+        tomatoes = try c.decodeIfPresent(Int.self, forKey: .tomatoes)
+        waterGlasses = try c.decodeIfPresent(Int.self, forKey: .waterGlasses)
+        if let recs = try c.decodeIfPresent([DoneRecord].self, forKey: .doneRecords) {
+            doneRecords = recs
+        } else if let ids = try c.decodeIfPresent([String].self, forKey: .doneIdsLegacy) {
+            // 旧格式迁移：id 数组 → DoneRecord（用任务计划时间作近似）
+            doneRecords = ids.map { id in
+                DoneRecord(taskId: id, timestamp: Self.scheduledTimestamp(dayKey: date, taskId: id))
+            }
+        } else {
+            doneRecords = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(date, forKey: .date)
+        try c.encodeIfPresent(weight, forKey: .weight)
+        if let r = bpReadings, !r.isEmpty { try c.encode(r, forKey: .bpReadings) }
+        try c.encodeIfPresent(sleepMinutes, forKey: .sleepMinutes)
+        try c.encodeIfPresent(doneCount, forKey: .doneCount)
+        try c.encodeIfPresent(tomatoes, forKey: .tomatoes)
+        try c.encodeIfPresent(waterGlasses, forKey: .waterGlasses)
+        if let recs = doneRecords, !recs.isEmpty { try c.encode(recs, forKey: .doneRecords) }
+    }
+
+    /// 旧数据迁移用：把任务计划时间（"07:00"）落到指定日期，作为完成时刻的近似
+    static func scheduledTimestamp(dayKey: String, taskId: String) -> Double {
+        let dp = dayKey.split(separator: "-").compactMap { Int($0) }
+        guard dp.count == 3 else { return Date().timeIntervalSince1970 }
+        var c = DateComponents(); c.year = dp[0]; c.month = dp[1]; c.day = dp[2]
+        guard let day = Calendar.current.date(from: c) else { return Date().timeIntervalSince1970 }
+        let tp = taskId.split(separator: ":").compactMap { Int($0) }
+        guard tp.count == 2 else { return day.timeIntervalSince1970 }
+        return day.addingTimeInterval(Double(tp[0]) * 3600 + Double(tp[1]) * 60).timeIntervalSince1970
+    }
+
+    var doneSet: Set<String> { Set((doneRecords ?? []).map { $0.taskId }) }
 }
 
 // MARK: - 整点起身提醒轮换的拉伸动作库
@@ -180,13 +302,50 @@ let STRETCH_TIPS = [
 final class VitalityStore: ObservableObject {
     struct PersistedState: Codable {
         let day: String
-        let done: [String]
+        var doneRecords: [DoneRecord]?
         var metrics: VitalityMetrics?
         var waterGlasses: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case day, doneRecords, metrics, waterGlasses
+            case doneLegacy = "done"
+        }
+
+        init(day: String, doneRecords: [DoneRecord]?, metrics: VitalityMetrics?, waterGlasses: Int?) {
+            self.day = day
+            self.doneRecords = doneRecords
+            self.metrics = metrics
+            self.waterGlasses = waterGlasses
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            day = try c.decode(String.self, forKey: .day)
+            metrics = try c.decodeIfPresent(VitalityMetrics.self, forKey: .metrics)
+            waterGlasses = try c.decodeIfPresent(Int.self, forKey: .waterGlasses)
+            if let recs = try c.decodeIfPresent([DoneRecord].self, forKey: .doneRecords) {
+                doneRecords = recs
+            } else if let ids = try c.decodeIfPresent([String].self, forKey: .doneLegacy) {
+                // 旧格式迁移：只存了任务 id，用该任务的计划时间作为完成时刻近似
+                doneRecords = ids.map { id in
+                    DoneRecord(taskId: id, timestamp: HistoryDay.scheduledTimestamp(dayKey: day, taskId: id))
+                }
+            } else {
+                doneRecords = nil
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(day, forKey: .day)
+            if let r = doneRecords, !r.isEmpty { try c.encode(r, forKey: .doneRecords) }
+            try c.encodeIfPresent(metrics, forKey: .metrics)
+            try c.encodeIfPresent(waterGlasses, forKey: .waterGlasses)
+        }
     }
 
     @Published var dayKey: String
-    @Published var done: Set<String>
+    @Published var doneRecords: [DoneRecord] = []
     @Published var settings: VitalitySettings
     @Published var banner: String?
     @Published var notifStatus: NotifStatus = .unknown
@@ -219,7 +378,7 @@ final class VitalityStore: ObservableObject {
            let s = try? JSONDecoder().decode(PersistedState.self, from: data),
            s.day == today {
             dayKey = today
-            done = Set(s.done)
+            doneRecords = s.doneRecords ?? []
             waterGlasses = s.waterGlasses ?? 0
             if let m = s.metrics {
                 metrics = m
@@ -227,7 +386,7 @@ final class VitalityStore: ObservableObject {
             }
         } else {
             dayKey = today
-            done = []
+            doneRecords = []
         }
 
         if let raw = defaults.string(forKey: "vitality.settings"),
@@ -252,9 +411,18 @@ final class VitalityStore: ObservableObject {
         return "\(c.year ?? 0)-\(c.month ?? 0)-\(c.day ?? 0)"
     }
 
+    /// 当前已完成任务的 id 集合（便利属性）
+    var done: Set<String> { Set(doneRecords.map { $0.taskId }) }
+
+    func isDone(_ id: String) -> Bool { done.contains(id) }
+
+    func doneTimestamp(_ id: String) -> Double? {
+        doneRecords.first { $0.taskId == id }?.timestamp
+    }
+
     private func persistState() {
         syncHistoryToday()
-        let s = PersistedState(day: dayKey, done: Array(done), metrics: metrics, waterGlasses: waterGlasses)
+        let s = PersistedState(day: dayKey, doneRecords: doneRecords, metrics: metrics, waterGlasses: waterGlasses)
         if let data = try? JSONEncoder().encode(s), let raw = String(data: data, encoding: .utf8) {
             defaults.set(raw, forKey: "vitality.state")
         }
@@ -272,13 +440,12 @@ final class VitalityStore: ObservableObject {
         let entry = HistoryDay(
             date: key,
             weight: metrics.weight,
-            sys: metrics.sys,
-            dia: metrics.dia,
+            bpReadings: metrics.bpReadings.isEmpty ? nil : metrics.bpReadings,
             sleepMinutes: metrics.sleepMinutes,
             doneCount: done.count,
             tomatoes: pomo.state.todayTomatoes,
             waterGlasses: waterGlasses,
-            doneIds: Array(done)
+            doneRecords: doneRecords.isEmpty ? nil : doneRecords
         )
         if let i = history.firstIndex(where: { $0.date == key }) {
             history[i] = entry
@@ -298,10 +465,33 @@ final class VitalityStore: ObservableObject {
     func setMetrics(_ mutate: (inout MetricsText) -> Void) {
         mutate(&metricsText)
         var m = metricsText.parsed
-        let hasAny = m.weight != nil || m.sys != nil || m.dia != nil || m.sleepMinutes != nil
+        m.bpReadings = metrics.bpReadings   // 血压不经过文本，保留已有读数
+        let hasAny = m.weight != nil || !m.bpReadings.isEmpty || m.sleepMinutes != nil
         m.savedAt = hasAny ? Date().timeIntervalSince1970 : nil
         metrics = m
         persistState()
+    }
+
+    /// 新增一次血压读数（时间取当前）
+    func addBPReading(sys: Int, dia: Int) {
+        let r = BPReading(timestamp: Date().timeIntervalSince1970, sys: sys, dia: dia)
+        metrics.bpReadings.append(r)
+        metrics.savedAt = Date().timeIntervalSince1970
+        persistState()
+    }
+
+    func removeBPReading(_ id: String) {
+        metrics.bpReadings.removeAll { $0.id == id }
+        if metrics.bpReadings.isEmpty && metrics.weight == nil && metrics.sleepMinutes == nil {
+            metrics.savedAt = nil
+        }
+        persistState()
+    }
+
+    /// 某天最新血压读数（趋势图用）
+    func latestBP(on iso: String) -> BPReading? {
+        if iso == VitalityStore.isoKey() { return metrics.latestBP }
+        return history.first { $0.date == iso }?.bpReadings?.max(by: { $0.timestamp < $1.timestamp })
     }
 
     func persistSettings() {
@@ -317,7 +507,11 @@ final class VitalityStore: ObservableObject {
     }
 
     func toggle(_ id: String) {
-        if done.contains(id) { done.remove(id) } else { done.insert(id) }
+        if let i = doneRecords.firstIndex(where: { $0.taskId == id }) {
+            doneRecords.remove(at: i)
+        } else {
+            doneRecords.append(DoneRecord(taskId: id, timestamp: Date().timeIntervalSince1970))
+        }
         persistState()
         onReschedule?()
     }
@@ -338,7 +532,7 @@ final class VitalityStore: ObservableObject {
         let today = VitalityStore.todayKey()
         guard today != dayKey else { return false }
         dayKey = today
-        done = []
+        doneRecords = []
         fired = []
         metrics = VitalityMetrics()
         metricsText = MetricsText()
@@ -367,12 +561,12 @@ final class VitalityStore: ObservableObject {
         guard let d = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) else { return false }
         if offset == 0 {
             return !done.isEmpty || waterGlasses > 0 || pomo.state.todayTomatoes > 0
-                || metrics.weight != nil || metrics.sys != nil || metrics.dia != nil || metrics.sleepMinutes != nil
+                || metrics.weight != nil || !metrics.bpReadings.isEmpty || metrics.sleepMinutes != nil
         }
         let iso = VitalityStore.isoKey(d)
         guard let h = history.first(where: { $0.date == iso }) else { return false }
         return (h.doneCount ?? 0) > 0 || (h.tomatoes ?? 0) > 0 || (h.waterGlasses ?? 0) > 0
-            || h.weight != nil || h.sys != nil || h.dia != nil || h.sleepMinutes != nil
+            || h.weight != nil || !(h.bpReadings ?? []).isEmpty || h.sleepMinutes != nil
     }
 
     /// 今天有活动算今天；没活动则从昨天起算——streak 只有隔一整天空窗才断
@@ -387,18 +581,23 @@ final class VitalityStore: ObservableObject {
         return streak
     }
 
-    /// 补卡：切换某个历史日期某任务的完成状态（仅限历史快照，不改今天）
+    /// 补卡：切换某个历史日期某任务的完成状态（带当天午夜兜底时间戳）
     func toggleHistoryDone(_ isoDate: String, taskId: String) {
         guard isoDate != VitalityStore.isoKey() else { return }
+        let baseTs = HistoryDay.scheduledTimestamp(dayKey: isoDate, taskId: taskId)
         if let i = history.firstIndex(where: { $0.date == isoDate }) {
-            var ids = history[i].doneSet
-            if ids.contains(taskId) { ids.remove(taskId) } else { ids.insert(taskId) }
-            history[i].doneIds = Array(ids)
-            history[i].doneCount = ids.count
+            var recs = history[i].doneRecords ?? []
+            if let j = recs.firstIndex(where: { $0.taskId == taskId }) {
+                recs.remove(at: j)
+            } else {
+                recs.append(DoneRecord(taskId: taskId, timestamp: baseTs))
+            }
+            history[i].doneRecords = recs.isEmpty ? nil : recs
+            history[i].doneCount = recs.count
         } else {
-            history.append(HistoryDay(date: isoDate, weight: nil, sys: nil, dia: nil,
-                                      sleepMinutes: nil, doneCount: 1, tomatoes: 0,
-                                      waterGlasses: 0, doneIds: [taskId]))
+            history.append(HistoryDay(date: isoDate, weight: nil, bpReadings: nil,
+                                       sleepMinutes: nil, doneCount: 1, tomatoes: 0,
+                                       waterGlasses: 0, doneRecords: [DoneRecord(taskId: taskId, timestamp: baseTs)]))
             history.sort { $0.date < $1.date }
         }
         persistHistory()

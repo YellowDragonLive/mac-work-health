@@ -306,10 +306,20 @@ struct ContentView: View {
                     .strikethrough(isDone)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                Text(t.id)
-                    .font(.system(size: 10))
-                    .foregroundColor(current && !isDone ? .gold : .secondary)
-                    .monospacedDigit()
+                // 已完成显示实际完成时刻，未完成显示计划时间
+                if isDone, let ts = store.doneTimestamp(t.id) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 8.5))
+                        .foregroundColor(.mintC)
+                    Text(epochText(ts))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.mintC)
+                } else {
+                    Text(t.id)
+                        .font(.system(size: 10))
+                        .foregroundColor(current ? .gold : .secondary)
+                        .monospacedDigit()
+                }
             }
             .padding(.vertical, 7)
             .contentShape(Rectangle())
@@ -375,27 +385,88 @@ struct ContentView: View {
             }
             .animation(.spring(response: 0.4, dampingFraction: 0.7), value: m.weight)
 
-            // 血压
-            HStack(spacing: 8) {
-                Text("🩺 血压")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .frame(width: 62, alignment: .leading)
-                MetricField(placeholder: "高压", text: sysBinding, width: 48)
-                Text("/")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                MetricField(placeholder: "低压", text: diaBinding, width: 48)
-                if let st = m.bpStatus {
-                    Text(st.0)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(st.1)
-                } else {
-                    Text("mmHg")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+            // 血压（一天多次，带时间戳）
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("🩺 血压")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .frame(width: 62, alignment: .leading)
+                    if store.metrics.bpReadings.isEmpty {
+                        Text("点击右侧添加测量")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("今日 \(store.metrics.bpReadings.count) 次")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.mintC)
+                    }
+                    Spacer()
+                    Button(action: { withAnimation { showBPInput.toggle() } }) {
+                        Image(systemName: showBPInput ? "minus" : "plus")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Color(hex: 0x1a1206))
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(LinearGradient(colors: [.gold, .amberC], startPoint: .leading, endPoint: .trailing)))
+                    }
+                    .buttonStyle(.plain)
                 }
-                Spacer()
+
+                // 已有读数列表
+                if !store.metrics.bpReadings.isEmpty {
+                    VStack(spacing: 3) {
+                        ForEach(store.metrics.bpReadings.sorted(by: { $0.timestamp > $1.timestamp })) { r in
+                            HStack(spacing: 6) {
+                                Text(r.timeText)
+                                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 36, alignment: .leading)
+                                Text("\(r.sys)/\(r.dia)")
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                Text(r.status.0)
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(r.status.1)
+                                Spacer()
+                                Button(action: { store.removeBPReading(r.id) }) {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 16, height: 16)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.04)))
+                        }
+                    }
+                }
+
+                // 展开输入面板
+                if showBPInput {
+                    HStack(spacing: 6) {
+                        Text("高压")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        MetricField(placeholder: "120", text: $bpSysText, width: 44)
+                        Text("低压")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                        MetricField(placeholder: "80", text: $bpDiaText, width: 44)
+                        Button(action: { recordBP() }) {
+                            Text("记录")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(Color(hex: 0x1a1206))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(Color.mintC))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: showBPInput)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: store.metrics.bpReadings.count)
 
             // 睡眠
             HStack(spacing: 8) {
@@ -473,6 +544,16 @@ struct ContentView: View {
         return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
     }
 
+    private func recordBP() {
+        let s = integers(bpSysText)
+        let d = integers(bpDiaText)
+        guard let sv = Int(s), sv > 0, let dv = Int(d), dv > 0 else { return }
+        store.addBPReading(sys: sv, dia: dv)
+        bpSysText = ""
+        bpDiaText = ""
+        withAnimation { showBPInput = false }
+    }
+
     // 输入清洗：只留 ASCII 数字，体重额外留一个小数点
     private func integers(_ s: String) -> String {
         String(s.filter { $0.isASCII && $0.isNumber }.prefix(3))
@@ -493,15 +574,10 @@ struct ContentView: View {
                 set: { v in store.setMetrics { $0.weight = decimal(v) } })
     }
 
-    private var sysBinding: Binding<String> {
-        Binding(get: { store.metricsText.sys },
-                set: { v in store.setMetrics { $0.sys = integers(v) } })
-    }
-
-    private var diaBinding: Binding<String> {
-        Binding(get: { store.metricsText.dia },
-                set: { v in store.setMetrics { $0.dia = integers(v) } })
-    }
+    // 血压输入面板状态（UI 层，不入 store）
+    @State private var showBPInput = false
+    @State private var bpSysText = ""
+    @State private var bpDiaText = ""
 
     private var sleepHBinding: Binding<String> {
         Binding(get: { store.metricsText.sleepH },
@@ -612,8 +688,8 @@ struct ContentView: View {
             MultiLineChart(
                 labels: days.map(\.label),
                 series: [
-                    (color: .gold, values: days.map { map[$0.iso]?.sys.map(Double.init) }),
-                    (color: .skyC, values: days.map { map[$0.iso]?.dia.map(Double.init) })
+                    (color: .gold, values: days.map { store.latestBP(on: $0.iso).map { Double($0.sys) } }),
+                    (color: .skyC, values: days.map { store.latestBP(on: $0.iso).map { Double($0.dia) } })
                 ],
                 formatter: { String(format: "%.0f", $0) },
                 legend: [("高压", .gold), ("低压", .skyC)],
@@ -646,9 +722,10 @@ struct ContentView: View {
                 trendPlaceholder
             }
         case .bp:
-            let lastEntry = days.compactMap { map[$0.iso] }.last { $0.sys != nil && $0.dia != nil }
-            if let e = lastEntry, let s = e.sys, let dd = e.dia {
-                Text("最新 \(s)/\(dd) mmHg")
+            let today = VitalityStore.isoKey()
+            if let r = store.latestBP(on: today) {
+                let count = store.metrics.bpReadings.count
+                Text("最新 \(r.sys)/\(r.dia) mmHg · 今日 \(count) 次")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(.skyC)
             } else {
@@ -864,8 +941,7 @@ struct ContentView: View {
     private func isDone(_ task: VitalityTask, on d: Date) -> Bool {
         if Calendar.current.isDateInToday(d) { return store.done.contains(task.id) }
         guard let h = historyMap[VitalityStore.isoKey(d)] else { return false }
-        if let ids = h.doneIds { return ids.contains(task.id) }
-        return false
+        return h.doneSet.contains(task.id)
     }
 
     private var matrixCard: some View {
@@ -1015,6 +1091,20 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(future)
+        .help(cellHelp(t, d, done: done))
+    }
+
+    private func cellHelp(_ t: VitalityTask, _ d: Date, done: Bool) -> String {
+        let c = Calendar.current.dateComponents([.month, .day], from: d)
+        let dayText = "\(c.month ?? 0)月\(c.day ?? 0)日"
+        guard done else { return "\(dayText) · \(t.label) · 未完成（点一下补卡）" }
+        if Calendar.current.isDateInToday(d), let ts = store.doneTimestamp(t.id) {
+            return "\(dayText) · \(t.label) · \(epochText(ts)) 完成"
+        }
+        if let rec = historyMap[VitalityStore.isoKey(d)]?.doneRecords?.first(where: { $0.taskId == t.id }) {
+            return "\(dayText) · \(t.label) · \(rec.timeText) 完成"
+        }
+        return "\(dayText) · \(t.label) · 已完成"
     }
 
     // MARK: 月历打卡
@@ -1106,17 +1196,19 @@ struct ContentView: View {
     private func dayStatus(_ d: Date) -> DayInfo {
         if Calendar.current.isDateInToday(d) {
             let mv = store.metrics
-            let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
+            let hasM = mv.weight != nil || !mv.bpReadings.isEmpty || mv.sleepMinutes != nil
             let tc = store.pomo.state.todayTomatoes
             return DayInfo(metrics: hasM, checklist: !store.done.isEmpty, tomatoes: tc > 0,
                            doneCount: store.done.count, tomatoCount: tc,
                            waterGlasses: store.waterGlasses, metricsVal: mv)
         }
         let h = historyMap[VitalityStore.isoKey(d)]
-        let mv = VitalityMetrics(weight: h?.weight, sys: h?.sys, dia: h?.dia,
-                                 sleepMinutes: h?.sleepMinutes, savedAt: nil)
-        let hasM = mv.weight != nil || mv.sys != nil || mv.dia != nil || mv.sleepMinutes != nil
-        let dc = h?.doneCount ?? 0
+        var mv = VitalityMetrics()
+        mv.weight = h?.weight
+        mv.bpReadings = h?.bpReadings ?? []
+        mv.sleepMinutes = h?.sleepMinutes
+        let hasM = mv.weight != nil || !mv.bpReadings.isEmpty || mv.sleepMinutes != nil
+        let dc = h?.doneCount ?? h?.doneRecords?.count ?? 0
         let tc = h?.tomatoes ?? 0
         let wg = h?.waterGlasses ?? 0
         return DayInfo(metrics: hasM, checklist: dc > 0, tomatoes: tc > 0,
@@ -1185,8 +1277,10 @@ struct ContentView: View {
                 if let w = st.metricsVal.weight {
                     detailRow("⚖️", "体重", String(format: "%.1f kg", w))
                 }
-                if let s = st.metricsVal.sys, let dd = st.metricsVal.dia {
-                    detailRow("🩺", "血压", "\(s)/\(dd) mmHg")
+                if !st.metricsVal.bpReadings.isEmpty {
+                    ForEach(st.metricsVal.bpReadings.sorted(by: { $0.timestamp > $1.timestamp })) { r in
+                        detailRow("🩺", "血压 \(r.timeText)", "\(r.sys)/\(r.dia) \(r.status.0)")
+                    }
                 }
                 if st.metricsVal.sleepText != nil {
                     detailRow("😴", "睡眠", st.metricsVal.sleepText ?? "")
@@ -1197,6 +1291,31 @@ struct ContentView: View {
                 if st.waterGlasses > 0 {
                     detailRow("🚰", "饮水", "\(st.waterGlasses) 杯（约 \(st.waterGlasses * 250) ml）")
                 }
+
+                // 当天各任务的完成时刻
+                let recs = dayDoneRecords(selectedDate)
+                if !recs.isEmpty {
+                    Divider().overlay(Color.white.opacity(0.06))
+                    Text("完成时刻")
+                        .font(.system(size: 9))
+                        .foregroundColor(Color.white.opacity(0.3))
+                    ScrollView {
+                        VStack(spacing: 3) {
+                            ForEach(recs.sorted(by: { $0.timestamp < $1.timestamp })) { r in
+                                HStack(spacing: 6) {
+                                    Text(r.timeText)
+                                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.mintC)
+                                    Text(taskShortName(r.taskId))
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 92)
+                }
             } else {
                 Text("这一天没有记录")
                     .font(.system(size: 10))
@@ -1206,6 +1325,16 @@ struct ContentView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.22)))
+    }
+
+    /// 某天各任务的完成记录（今天取实时）
+    private func dayDoneRecords(_ d: Date) -> [DoneRecord] {
+        if Calendar.current.isDateInToday(d) { return store.doneRecords }
+        return historyMap[VitalityStore.isoKey(d)]?.doneRecords ?? []
+    }
+
+    private func taskShortName(_ id: String) -> String {
+        TASKS.first { $0.id == id }?.short ?? id
     }
 
     private func detailRow(_ icon: String, _ title: String, _ value: String) -> some View {
